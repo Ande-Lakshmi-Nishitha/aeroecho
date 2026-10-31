@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.ipynb_checkpoints/
+
+# Exported models (too large / regenerated in Colab)
+*.tflite
+
+# Local datasets (ESC-50, UrbanSound8K, LibriSpeech, ...) - keep the folder, ignore contents
+member2_audio_ml/datasets/*
+!member2_audio_ml/datasets/.gitkeep
