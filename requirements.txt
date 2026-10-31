@@ -1,8 +1,0 @@
-# Member 3 Core (python 3.10+):  pip install -r member3_core_ui/requirements.txt
-fastapi>=0.110
-uvicorn[standard]>=0.27
-pydantic>=2.5
-numpy>=1.26
-httpx>=0.26
-websockets>=12
-pytest>=8
