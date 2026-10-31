@@ -10,6 +10,9 @@ Start the Core first (python main.py), open http://127.0.0.1:8000, then:
     python test_mock_publisher.py --mono                  # mono-mic fallback (no bearings, loudness only)
     python test_mock_publisher.py --noise 20 40           # machinery noise from t=20 s to t=40 s (Q_audio drops)
     python test_mock_publisher.py --auto-move --auto-decide APPROVE   # fully unattended run
+    python test_mock_publisher.py --sensors wifi          # only fake Wi-Fi (Member 2's REAL audio is running)
+    python test_mock_publisher.py --sensors audio         # only fake audio (REAL ghop-ghop Wi-Fi is running)
+    python test_mock_publisher.py --sensors none --auto-move   # no fake sensors, just the auto operator
 
 It reads the probe's position from GET /grid, so the readings always match where the Core thinks
 the probe is. Records follow contracts/perception_schema.json exactly; the Core cannot tell them
@@ -58,8 +61,10 @@ def main() -> None:
     ap.add_argument("--auto-decide", choices=["APPROVE", "REJECT", "DEFER"], help="answer candidates automatically after 5 s")
     ap.add_argument("--bearing-noise", type=float, default=10.0, help="deg, per 1 s window (3.4 cm laptop array ~10)")
     ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--sensors", default="audio,wifi", help="which fake sensors to send: audio,wifi | audio | wifi | none")
     a = ap.parse_args()
     rng = random.Random(a.seed)
+    fake = {s.strip() for s in a.sensors.split(",")} - {"none", ""}
     victim = (a.victim[0], a.victim[1])
     voice_level_db = rng.uniform(26, 34)  # SNR the victim's voice would have at 1 m
 
@@ -67,7 +72,7 @@ def main() -> None:
     if not h.get("ok"):
         raise SystemExit(f"Core not reachable at {a.core}: start it with  python main.py")
     print(f"Mock sensors -> {a.core}  victim={victim} mode={a.mode} {'MONO' if a.mono else 'stereo'}"
-          f"{' auto-move' if a.auto_move else ''}{' auto-decide ' + a.auto_decide if a.auto_decide else ''}")
+          f"{' auto-move' if a.auto_move else ''}{' auto-decide ' + a.auto_decide if a.auto_decide else ''} fake sensors={sorted(fake) or 'none'}")
 
     t0 = time.time()
     next_audio = next_wifi = t0
@@ -108,6 +113,8 @@ def main() -> None:
                 pending_seen_at[cid] = float("inf")
 
         # ---------------- audio, 2 records/s
+        if now >= next_audio and "audio" not in fake:
+            next_audio = now + 0.5
         if now >= next_audio:
             next_audio += 0.5
             calling = a.mode == "voice" and (int(elapsed) % 7) < 4  # calls ~4 s out of every 7
@@ -132,6 +139,8 @@ def main() -> None:
                 print("audio rejected:", r)
 
         # ---------------- Wi-Fi, 1 record/s
+        if now >= next_wifi and "wifi" not in fake:
+            next_wifi = now + 1.0
         if now >= next_wifi:
             next_wifi += 1.0
             if a.mode == "none":

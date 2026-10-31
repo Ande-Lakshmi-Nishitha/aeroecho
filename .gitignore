@@ -13,3 +13,6 @@ member2_audio_ml/datasets/*
 !member2_audio_ml/datasets/.gitkeep
 audit_log.jsonl
 *.jsonl.broken-*
+test_victim.wav
+tfhub_cache/
+.pytest_cache/
