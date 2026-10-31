@@ -82,6 +82,8 @@ class Candidate:
     turret_angle_deg: float
     probe_xy: tuple[float, float]
     evidence_record_ids: list[str]
+    basis: str = "acoustic"  # acoustic | acoustic_mono | wifi_breathing
+    radius_cells: int = C.CANDIDATE_RADIUS_CELLS
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -123,12 +125,14 @@ class FusionEngine:
 
         self.pending: Candidate | None = None
         self.hitl_deadline: float | None = None
-        self.deferred: list[tuple[int, int, float]] = []  # (row, col, until)
+        self.deferred: list[tuple[int, int, float, int]] = []  # (row, col, until, radius_cells)
         self.found: list[dict[str, Any]] = []
 
         self.stop_index = 0
         self._stop_snr: list[float] = []
         self.stops_heard: set[int] = set()  # stops where audio detections were used
+        self.stops_breathing: set[int] = set()  # stops where Wi-Fi breathing was used
+        self.wifi_consecutive = 0
 
         self.pan_deg = 0.0
         self.last_pan_at = -math.inf
@@ -192,6 +196,7 @@ class FusionEngine:
         self.latest.clear()  # readings from the previous spot no longer describe this one
         self.stop_index += 1
         self._stop_snr = []
+        self.wifi_consecutive = 0
         info = {"event": "placed", "x_m": x, "y_m": y, "waypoint": self.probe_waypoint, "timestamp": now}
         self.on_event("PROBE", info)
         return info
@@ -274,7 +279,7 @@ class FusionEngine:
             s, q = float(rec["detect_score"]), float(rec["listening_quality"])
             self.latest[modality] = (float(rec["timestamp"]), s, q)
             if modality == "audio":
-                self.grid.audio_mono = int(rec.get("mic_channels", 2)) == 1
+                self.grid.audio_mono = int(rec.get("mic_channels") or 2) == 1
                 bearing = None if self.grid.audio_mono else rec.get("bearing_deg")
                 self.grid.update_audio(s, q, bearing)
                 if s >= 0.5:
@@ -285,6 +290,11 @@ class FusionEngine:
             else:
                 rng = rec.get("range_m") if self.probe_waypoint == C.WIFI_CALIBRATED_AT else None
                 self.grid.update_wifi(s, q, rng, rec.get("range_sigma_m") if rng is not None else None)
+                if s >= C.T2_WIFI_THRESHOLD and q > 0:
+                    self.wifi_consecutive += 1
+                    self.stops_breathing.add(self.stop_index)
+                else:
+                    self.wifi_consecutive = 0
             self.recent_used_ids.append(record_id)
             self._fuse(now)
             actions += self.decide(now)
@@ -300,22 +310,21 @@ class FusionEngine:
         st = self.state
         row, col, mass = self.grid.best_region(self.candidate_radius)
 
-        # Tier 2: candidate -> halt and ask the rescuer.
+        # Tier 2a: acoustic candidate (bearings / loudness from >= 2-3 stops).
         min_stops = C.T2_MIN_STOPS_MONO if self.grid.audio_mono else C.T2_MIN_STOPS
         if (st.consecutive_high >= C.T2_CONSECUTIVE and mass >= C.T2_MIN_REGION_P
                 and len(self.stops_heard) >= min_stops and not self._suppressed(row, col)):
-            x, y = self.grid.cell_to_world(row, col)
-            angle = self.grid.turret_angle_to(row, col)
-            self.pending = Candidate(f"c-{next(self._cand_ids):04d}", now, row, col, x, y, round(mass, 4),
-                                     round(st.s_master, 4), angle, self.grid.probe_xy, list(self.recent_used_ids))
-            self.hitl_deadline = now + C.HITL_TIMEOUT_S
-            if not self.estop_engaged:
-                actions.append(self._pan(now, angle, "point camera at candidate for verification", force=True))
-            actions.append(self._action(now, "CANDIDATE", 2, self.pending.to_dict(),
-                                        f"S_master {st.s_master:.2f} > {C.T2_THRESHOLD} x{st.consecutive_high}, region mass {mass:.2f}"))
-            self.on_event("CANDIDATE", self.pending.to_dict())
-            self._set_mode(AWAITING_HITL, now, "tier 2 candidate")
-            return [a for a in actions if a is not None]
+            basis = "acoustic_mono" if self.grid.audio_mono else "acoustic"
+            return self._raise_candidate(now, row, col, mass, basis, self.candidate_radius,
+                                         f"S_master {st.s_master:.2f} > {C.T2_THRESHOLD} x{st.consecutive_high}, region mass {mass:.2f}")
+
+        # Tier 2b: silent victim - Wi-Fi breathing at >= 2 stops, coarse 2.2 m region.
+        if (len(self.stops_heard) < min_stops and len(self.stops_breathing) >= C.T2_MIN_STOPS_WIFI
+                and self.wifi_consecutive >= C.T2_WIFI_CONSECUTIVE):
+            r2, c2, m2 = self.grid.best_region(C.CANDIDATE_RADIUS_CELLS_WIFI)
+            if m2 >= C.T2_MIN_REGION_P and not self._suppressed(r2, c2):
+                return self._raise_candidate(now, r2, c2, m2, "wifi_breathing", C.CANDIDATE_RADIUS_CELLS_WIFI,
+                                             f"Wi-Fi breathing at {len(self.stops_breathing)} stops, no voice; region mass {m2:.2f} (coarse)")
 
         # Tier 1: interesting but not conclusive -> listen longer here.
         if (st.s_master > C.T1_THRESHOLD and self.dwell_extensions < C.MAX_DWELL_EXTENSIONS
@@ -335,6 +344,21 @@ class FusionEngine:
                 actions.append(pan)
         return actions
 
+    def _raise_candidate(self, now: float, row: int, col: int, mass: float, basis: str, radius: int, reason: str) -> list[Action]:
+        actions: list[Action] = []
+        x, y = self.grid.cell_to_world(row, col)
+        angle = self.grid.turret_angle_to(row, col)
+        self.pending = Candidate(f"c-{next(self._cand_ids):04d}", now, row, col, x, y, round(mass, 4),
+                                 round(self.state.s_master, 4), angle, self.grid.probe_xy, list(self.recent_used_ids),
+                                 basis, radius)
+        self.hitl_deadline = now + C.HITL_TIMEOUT_S
+        if not self.estop_engaged:
+            actions.append(self._pan(now, angle, "point camera at candidate for verification", force=True))
+        actions.append(self._action(now, "CANDIDATE", 2, self.pending.to_dict(), reason))
+        self.on_event("CANDIDATE", self.pending.to_dict())
+        self._set_mode(AWAITING_HITL, now, "tier 2 candidate")
+        return actions
+
     def _pan(self, now: float, angle: float, reason: str, force: bool = False) -> Action | None:
         angle = float(min(max(round(angle / C.PAN_STEP_DEG) * C.PAN_STEP_DEG, C.PAN_MIN_DEG), C.PAN_MAX_DEG))
         if not force and (angle == self.pan_deg or now - self.last_pan_at < C.PAN_MIN_INTERVAL_S):
@@ -346,12 +370,12 @@ class FusionEngine:
     def candidate_radius(self) -> int:
         return C.CANDIDATE_RADIUS_CELLS_MONO if self.grid.audio_mono else C.CANDIDATE_RADIUS_CELLS
 
-    def _suppressed(self, row: int, col: int) -> bool:
-        r = self.candidate_radius
-        near = lambda a, b: abs(a[0] - b[0]) <= r and abs(a[1] - b[1]) <= r
-        if any(near((row, col), (d[0], d[1])) for d in self.deferred):
+    def _suppressed(self, row: int, col: int, r: int | None = None) -> bool:
+        r = self.candidate_radius if r is None else r
+        if any(abs(row - d[0]) <= r and abs(col - d[1]) <= r for d in self.deferred):
             return True
-        return any(near((row, col), (f["row"], f["col"])) for f in self.found)
+        x, y = self.grid.cell_to_world(row, col)
+        return any(math.hypot(x - f["x_m"], y - f["y_m"]) <= C.FOUND_EXCLUSION_M for f in self.found)
 
     # --------------------------------------------------------- human input
     def hitl_decision(self, candidate_id: str, decision: str, now: float | None = None, operator: str = "", note: str = "") -> dict[str, Any]:
@@ -363,12 +387,12 @@ class FusionEngine:
             raise ValueError(f"no pending candidate {candidate_id!r}")
         c = self.pending
         if decision == "APPROVE":
-            self.grid.mark_found(c.row, c.col, self.candidate_radius)
+            self.grid.mark_found(c.row, c.col, max(c.radius_cells, C.FOUND_CLEAR_RADIUS_CELLS))
             self.found.append({**c.to_dict(), "approved_at": now, "operator": operator})
         elif decision == "REJECT":
-            self.grid.penalize_region(c.row, c.col, radius=self.candidate_radius)
+            self.grid.penalize_region(c.row, c.col, radius=c.radius_cells)
         else:
-            self.deferred.append((c.row, c.col, now + C.DEFER_COOLDOWN_S))
+            self.deferred.append((c.row, c.col, now + C.DEFER_COOLDOWN_S, c.radius_cells))
         self.on_event("HITL_DECISION", {"candidate_id": candidate_id, "decision": decision, "operator": operator, "note": note, "timestamp": now})
         self.pending, self.hitl_deadline = None, None
         self.state.consecutive_high = 0
@@ -409,6 +433,7 @@ class FusionEngine:
         self.deferred.clear()
         self.found.clear()
         self.stops_heard.clear()
+        self.stops_breathing.clear()
         self._set_mode(ESTOP if self.estop_engaged else SEARCHING, now, "reset")
         self.on_event("RESET", {"timestamp": now})
 
@@ -444,6 +469,7 @@ class FusionEngine:
                             "size_m": (2 * self.candidate_radius + 1) * C.CELL_M},
             "audio_mode": "mono" if self.grid.audio_mono else "stereo",
             "stops_heard": len(self.stops_heard),
+            "stops_breathing": len(self.stops_breathing),
             "p_absent": round(self.grid.p_absent(), 4),
             "entropy_bits": round(self.grid.entropy(), 4),
             "pan_deg": self.pan_deg,

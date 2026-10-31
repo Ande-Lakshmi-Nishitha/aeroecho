@@ -40,9 +40,9 @@ WIFI_CLASSES = ("Respiration", "Presence", "None")
 #   +y, so they are directly comparable to world angles from the probe's spot.
 # ---------------------------------------------------------------------------
 MIC_SPACING_M = 0.034  # measured: built-in AMD laptop array, endfire test (Member 2)
-MIC_OFFSET_US = 20.0  # measured inter-channel boresight offset, subtracted by Member 2 before arcsin
+MIC_OFFSET_US = 20.0  # measured inter-channel offset; Member 2 subtracts it, so payload tdoa_us is offset-corrected
 SPEED_OF_SOUND_MPS = 343.0
-AUDIO_BEARING_LIMIT_DEG = 60.0  # audio bearings are clamped to +/- this
+AUDIO_BEARING_LIMIT_DEG = 60.0  # audio bearings are clamped to +/- this BY THE SENDER (contract). Must match Member 2's clamp.
 PROBE_HEADING_DEG = 0.0  # probe always placed facing +y
 
 PAN_MIN_DEG = -90
@@ -95,10 +95,10 @@ HALF_WIDTH_M = GRID_N * CELL_M / 2  # 3.0 m each side
 #   Each record multiplies it by a likelihood raised to (gain * quality).
 # ---------------------------------------------------------------------------
 PRIOR_ABSENT = 0.5  # P(no victim inside the 6 x 6 m area) before any evidence
-AUDIO_BEARING_SIGMA_DEG = 12.0  # at broadside (3.4 cm array: 1 sample = ~12 deg); widens as 1/cos(theta)
+AUDIO_BEARING_SIGMA_DEG = 10.0  # at broadside, per Member 2 (clean claps scatter ~7 deg; 1 sample ~12 deg); widens as 1/cos(theta)
 AUDIO_SIGMA_MAX_DEG = 25.0
 AUDIO_RANGE_SIGMA_M = 4.0  # P_D falls off as exp(-r^2 / 2 sigma^2) from the probe
-WIFI_RANGE_FALLOFF_M = 2.5  # same idea for CSI presence, cut off at WIFI_MAX_RANGE_M
+WIFI_RANGE_FALLOFF_M = 2.0  # same idea for CSI presence, cut off at WIFI_MAX_RANGE_M
 WIFI_RANGE_SIGMA_FLOOR_M = 0.5
 SENSOR_MODELS = {  # binary detector: P(detect | victim in view), P(detect | no victim)
     "audio": {"p_d": 0.80, "p_fa": 0.10},
@@ -108,14 +108,14 @@ SENSOR_MODELS = {  # binary detector: P(detect | victim in view), P(detect | no 
 # Records arrive at 1-2 Hz and are strongly correlated (silence persists), so
 # each one is a tempered likelihood: L ** (gain * q).
 AUDIO_EVIDENCE_GAIN = 0.6
-WIFI_EVIDENCE_GAIN = 0.15
+WIFI_EVIDENCE_GAIN = 0.6
 # Evidence from ONE probe stop saturates: the i-th record of a kind (detect / silence)
 # at the current stop is weighted by STOP_EVIDENCE_DECAY ** i. Staying longer adds
 # little; moving to a new viewpoint adds a lot. Counters reset when the probe moves.
 STOP_EVIDENCE_DECAY = 0.93
 # Silence is weak evidence for audio (victims call out intermittently); breathing
 # seen by Wi-Fi is continuous, so its silence keeps full weight.
-SILENCE_WEIGHT = {"audio": 0.35, "wifi": 1.0, "camera": 1.0}
+SILENCE_WEIGHT = {"audio": 0.1, "wifi": 1.0, "camera": 1.0}  # audio silence ~ uninformative (unconscious victims are silent)
 CAMERA_EVIDENCE_GAIN = 0.5
 CAMERA_AUTO_NEGATIVE = False  # True only if a person detector runs on /snapshot
 PAN_COST_PROB = 0.02  # camera pan cost (probability units) per 180 deg
@@ -148,8 +148,15 @@ T2_MIN_REGION_P = 0.50  # ... and 50% of belief inside one 1 m x 1 m region -> C
 HITL_TIMEOUT_S = 30.0  # no rescuer decision -> HOLD
 T2_MIN_STOPS = 2  # stereo: detections heard from >= 2 stops (triangulation needs two viewpoints)
 T2_MIN_STOPS_MONO = 3  # mono: loudness comparison needs >= 3 stops
+# Silent victim (no voice, Wi-Fi breathing only): coarse candidate so the camera + rescuer can search.
+T2_MIN_STOPS_WIFI = 2  # breathing detected at >= 2 stops
+T2_WIFI_THRESHOLD = 0.6  # Wi-Fi detect_score counted as "breathing"
+T2_WIFI_CONSECUTIVE = 3  # consecutive Wi-Fi records above threshold at the current stop
+CANDIDATE_RADIUS_CELLS_WIFI = 5  # 11 x 11 cells = 2.2 m box
 MAX_DWELL_EXTENSIONS = 1  # DWELL may extend a stop's scan window this many times
 DEFER_COOLDOWN_S = 60.0  # a DEFERred region is not re-raised as a candidate for this long
+FOUND_EXCLUSION_M = 1.5  # no new candidate within this distance of an APPROVEd victim (same person still calling)
+FOUND_CLEAR_RADIUS_CELLS = 4  # APPROVE clears a 9 x 9-cell (1.8 m) box around the victim
 PAN_MIN_INTERVAL_S = 2.0  # don't re-pan the turret more often than this
 EVIDENCE_IDS_KEEP = 10  # record ids attached to a candidate's evidence card
 AUTO_PLACE_AT_START = True  # engine starts with the probe placed at START_WAYPOINT
@@ -165,3 +172,16 @@ WIFI_MOTION_QUALITY_CAP = 0.50
 # ---------------------------------------------------------------------------
 AUDIT_LOG_PATH = os.getenv("AEROECHO_AUDIT_LOG", "audit_log.jsonl")
 GENESIS_HASH = "0" * 64
+
+# ---------------------------------------------------------------------------
+# Demo pacing: set AEROECHO_DEMO_FAST=1 to shorten settle/scan times for a live
+# review (about 15 s per stop instead of about 40 s). Real-sensor runs: leave unset.
+# ---------------------------------------------------------------------------
+DEMO_FAST = os.getenv("AEROECHO_DEMO_FAST", "0") == "1"
+if DEMO_FAST:
+    AUDIO_SETTLE_S = 2.0
+    WIFI_SETTLE_S = 6.0
+    SCAN_WINDOW_S = 8.0
+    PROBE_DWELL_S = 10.0
+    DWELL_S = 3.0
+    HITL_TIMEOUT_S = 60.0

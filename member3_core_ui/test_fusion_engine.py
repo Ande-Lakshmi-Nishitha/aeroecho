@@ -337,3 +337,30 @@ def test_snr_ignored_in_stereo():
     eng.ingest(rec, now=t)
     assert not eng.grid.audio_mono and eng.grid.levels  # recorded ...
     assert not eng.grid._level_active()  # ... but not used in stereo
+
+
+# --------------------------------------------------------------- silent victim (Wi-Fi only)
+def test_silent_victim_found_by_wifi_breathing():
+    import numpy as np
+    rng = np.random.default_rng(0)
+    eng = new_engine()
+    victim = (1.2, 3.8)
+    t, end = T0, T0 + 600
+    while t < end and eng.mode != AWAITING_HITL:
+        px, py = eng.grid.probe_xy
+        d = math.hypot(victim[0] - px, victim[1] - py)
+        acts = list(eng.ingest(audio(t, s=float(np.clip(0.12 + rng.normal(0, 0.05), 0, 1)), b=None), now=t).actions)
+        if abs((t - T0) % 1.0) < 1e-6:
+            ws = float(np.clip(0.15 + 0.7 * math.exp(-0.5 * (d / 2.5) ** 2) + rng.normal(0, 0.05), 0, 1))
+            acts += eng.ingest(wifi(t, s=ws, q=0.75), now=t).actions
+        acts += eng.tick(t)
+        for a in acts:
+            if a.type == "MOVE_PROBE":
+                eng.probe_moving(t)
+                t += 8
+                eng.probe_placed(t, waypoint=a.payload["waypoint"])
+        t += 0.5
+    assert eng.mode == AWAITING_HITL
+    c = eng.pending
+    assert c.basis == "wifi_breathing" and c.radius_cells == C.CANDIDATE_RADIUS_CELLS_WIFI
+    assert math.hypot(c.x_m - victim[0], c.y_m - victim[1]) < 1.5
