@@ -39,9 +39,10 @@ WIFI_CLASSES = ("Respiration", "Presence", "None")
 #   Audio bearings are relative to the probe's mic array, which always faces
 #   +y, so they are directly comparable to world angles from the probe's spot.
 # ---------------------------------------------------------------------------
-MIC_SPACING_M = 0.12
+MIC_SPACING_M = 0.034  # measured: built-in AMD laptop array, endfire test (Member 2)
+MIC_OFFSET_US = 20.0  # measured inter-channel boresight offset, subtracted by Member 2 before arcsin
 SPEED_OF_SOUND_MPS = 343.0
-AUDIO_BEARING_LIMIT_DEG = 60.0  # audio bearings are clamped to +/- this (48 kHz -> ~7 deg resolution at 60)
+AUDIO_BEARING_LIMIT_DEG = 60.0  # audio bearings are clamped to +/- this
 PROBE_HEADING_DEG = 0.0  # probe always placed facing +y
 
 PAN_MIN_DEG = -90
@@ -94,8 +95,8 @@ HALF_WIDTH_M = GRID_N * CELL_M / 2  # 3.0 m each side
 #   Each record multiplies it by a likelihood raised to (gain * quality).
 # ---------------------------------------------------------------------------
 PRIOR_ABSENT = 0.5  # P(no victim inside the 6 x 6 m area) before any evidence
-AUDIO_BEARING_SIGMA_DEG = 8.0  # at broadside; widens as 1/cos(theta) toward endfire
-AUDIO_SIGMA_MAX_DEG = 20.0
+AUDIO_BEARING_SIGMA_DEG = 12.0  # at broadside (3.4 cm array: 1 sample = ~12 deg); widens as 1/cos(theta)
+AUDIO_SIGMA_MAX_DEG = 25.0
 AUDIO_RANGE_SIGMA_M = 4.0  # P_D falls off as exp(-r^2 / 2 sigma^2) from the probe
 WIFI_RANGE_FALLOFF_M = 2.5  # same idea for CSI presence, cut off at WIFI_MAX_RANGE_M
 WIFI_RANGE_SIGMA_FLOOR_M = 0.5
@@ -125,6 +126,14 @@ REJECT_LIKELIHOOD = 0.05  # rescuer REJECT multiplies the candidate region by th
 CANDIDATE_RADIUS_CELLS = 2  # candidate region = 5 x 5 cells (1 m x 1 m) around the peak
 PROB_FLOOR = 1e-12
 
+# Mono fallback (mic_channels = 1): no bearing. Localise from how LOUD the victim is
+# at each stop: SNR falls ~20*log10(d); the unknown source level cancels across stops.
+LEVEL_LOCALIZATION = "mono"  # "mono" (only when mic_channels = 1) | "always" | "never"
+LEVEL_SIGMA_DB = 5.0  # per-stop mean-level error indoors (reverb, body/head shadowing)
+LEVEL_MIN_STOPS = 2  # need two stops' levels before the term means anything
+LEVEL_MIN_DIST_M = 0.3  # near-field clamp for 20*log10(d)
+CANDIDATE_RADIUS_CELLS_MONO = 4  # mono candidate box = 9 x 9 cells (1.8 m x 1.8 m)
+
 # ---------------------------------------------------------------------------
 # Fusion and safety tiers  [TUNE]
 # ---------------------------------------------------------------------------
@@ -133,10 +142,18 @@ EMA_ALPHA = 0.5
 QUALITY_EPS = 1e-6
 T1_THRESHOLD = 0.50  # S_master above this -> DWELL
 DWELL_S = 5.0
-T2_THRESHOLD = 0.85  # S_master above this ...
+T2_THRESHOLD = 0.65  # smoothed S_master above this (victim heard now) ...
 T2_CONSECUTIVE = 3  # ... for this many updates ...
 T2_MIN_REGION_P = 0.50  # ... and 50% of belief inside one 1 m x 1 m region -> CANDIDATE (HITL)
 HITL_TIMEOUT_S = 30.0  # no rescuer decision -> HOLD
+T2_MIN_STOPS = 2  # stereo: detections heard from >= 2 stops (triangulation needs two viewpoints)
+T2_MIN_STOPS_MONO = 3  # mono: loudness comparison needs >= 3 stops
+MAX_DWELL_EXTENSIONS = 1  # DWELL may extend a stop's scan window this many times
+DEFER_COOLDOWN_S = 60.0  # a DEFERred region is not re-raised as a candidate for this long
+PAN_MIN_INTERVAL_S = 2.0  # don't re-pan the turret more often than this
+EVIDENCE_IDS_KEEP = 10  # record ids attached to a candidate's evidence card
+AUTO_PLACE_AT_START = True  # engine starts with the probe placed at START_WAYPOINT
+WIFI_CALIBRATED_AT = "W0"  # ghop-ghop distance calibration is only valid at this stop
 
 # Wi-Fi adapter mapping from ghop-ghop telemetry  [TUNE]
 WIFI_FULL_PACKET_RATE_HZ = 80.0  # packet rate that counts as Q_link = 1

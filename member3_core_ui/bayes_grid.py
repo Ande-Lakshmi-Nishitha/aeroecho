@@ -25,6 +25,9 @@ A 2-mic broadside array measures sin(theta) only: bearing b is equally
 consistent with b (front) and 180 - b (behind). Both wedges get evidence;
 a second probe stop decides which one is real.
 
+Mono fallback (mic_channels = 1, no bearings): per-stop mean SNR is compared across
+stops (level_loglik); the unknown source level cancels. ~1 m accuracy after 4-5 stops.
+
 Planning (expected entropy reduction of b, in bits):
   best_waypoint() - where to carry the probe next (audio + Wi-Fi)
   best_pan()      - where to point the turret camera: max P(victim in view), for verification
@@ -75,6 +78,7 @@ class BayesGrid:
         self.prior_absent = prior_absent
         self.pan_angles = np.asarray(tuple(pan_angles), dtype=float)
         self.waypoints = dict(waypoints)
+        self.audio_mono = False  # True when mic_channels = 1: no bearings, planner uses omni audio
         self._wp_names = list(self.waypoints)
         self._wp_xy = np.asarray([self.waypoints[k] for k in self._wp_names], dtype=float)
         self.found: list[tuple[int, int]] = []
@@ -107,6 +111,7 @@ class BayesGrid:
         self.b_absent = float(self.prior_absent)
         self.found.clear()
         self.visits: dict[str, int] = {}
+        self.levels: dict[object, tuple[tuple[float, float], float]] = {}  # stop key -> (probe xy, mean SNR dB)
 
     def _normalise(self) -> None:
         self.b_cells = np.maximum(self.b_cells, C.PROB_FLOOR)
@@ -221,28 +226,64 @@ class BayesGrid:
         self.b_cells *= (1.0 - new_absent) / self.b_cells.sum()
         self.b_absent = new_absent
 
+    # ------------------------------------------------- level localisation
+    def set_stop_level(self, key: object, probe_xy: tuple[float, float], mean_snr_db: float) -> None:
+        """Mean SNR (dB) of detections heard at one probe stop. Re-calling with the same key updates it."""
+        self.levels[key] = ((float(probe_xy[0]), float(probe_xy[1])), float(mean_snr_db))
+
+    def _level_active(self) -> bool:
+        mode = C.LEVEL_LOCALIZATION
+        on = mode == "always" or (mode == "mono" and self.audio_mono)
+        return on and len(self.levels) >= C.LEVEL_MIN_STOPS
+
+    def level_loglik(self) -> np.ndarray:
+        """log P(stop levels | victim in cell), unknown source level marginalised out.
+
+        Each stop implies a source level L_i(c) = SNR_i + 20*log10(d_i(c)); for the true cell all
+        L_i agree. Penalise their spread: -n * var_i(L_i(c)) / (2 sigma^2).
+        """
+        if not self._level_active():
+            return np.zeros((self.n, self.n))
+        implied = [snr + 20.0 * np.log10(np.maximum(np.hypot(self.x - px, self.y - py), C.LEVEL_MIN_DIST_M))
+                   for (px, py), snr in self.levels.values()]
+        stack = np.stack(implied)
+        return -0.5 * stack.shape[0] * stack.var(axis=0) / C.LEVEL_SIGMA_DB**2
+
+    def _posterior(self) -> tuple[np.ndarray, float]:
+        """Belief with the level term folded in (cells, absent). Equals the base belief when inactive."""
+        if not self._level_active():
+            return self.b_cells, float(self.b_absent)
+        ll = self.level_loglik()
+        lik = np.exp(ll - ll.max())
+        cells = self.b_cells * lik
+        absent = self.b_absent * float(lik.mean())  # level term is neutral on present vs absent
+        z = cells.sum() + absent
+        return cells / z, absent / z
+
     # ------------------------------------------------------------ queries
     def prob(self) -> np.ndarray:
         """P(victim in cell), shape (n, n). Sums with p_absent() to 1."""
-        return self.b_cells.copy()
+        return self._posterior()[0].copy()
 
     def p_absent(self) -> float:
-        return float(self.b_absent)
+        return float(self._posterior()[1])
 
     def entropy(self) -> float:
-        return float(_entropy_bits(np.append(self.b_cells.ravel(), self.b_absent)))
+        cells, absent = self._posterior()
+        return float(_entropy_bits(np.append(cells.ravel(), absent)))
 
     def peak(self) -> tuple[int, int, float]:
-        row, col = np.unravel_index(int(np.argmax(self.b_cells)), self.b_cells.shape)
-        return int(row), int(col), float(self.b_cells[row, col])
+        cells = self._posterior()[0]
+        row, col = np.unravel_index(int(np.argmax(cells)), cells.shape)
+        return int(row), int(col), float(cells[row, col])
 
     def region_mass(self, row: int, col: int, radius: int = C.CANDIDATE_RADIUS_CELLS) -> float:
-        return float(self.b_cells[self._region(row, col, radius)].sum())
+        return float(self._posterior()[0][self._region(row, col, radius)].sum())
 
     def best_region(self, radius: int = C.CANDIDATE_RADIUS_CELLS) -> tuple[int, int, float]:
-        """Centre (row, col) of the 5x5 window holding the most belief, and that mass."""
+        """Centre (row, col) of the (2r+1)^2 window holding the most belief, and that mass."""
         k = 2 * radius + 1
-        padded = np.pad(self.b_cells, radius)
+        padded = np.pad(self._posterior()[0], radius)
         c = padded.cumsum(0).cumsum(1)
         c = np.pad(c, ((1, 0), (1, 0)))
         window = c[k:, k:] - c[:-k, k:] - c[k:, :-k] + c[:-k, :-k]
@@ -253,7 +294,8 @@ class BayesGrid:
     def _expected_ig(self, views: np.ndarray, model: str) -> np.ndarray:
         """Expected entropy drop (bits) of one binary look per view. views: (A, n, n)."""
         m = C.SENSOR_MODELS[model]
-        b = np.append(self.b_cells.ravel(), self.b_absent)  # (N+1,)
+        cells, absent = self._posterior()
+        b = np.append(cells.ravel(), absent)  # (N+1,)
         pd = m["p_fa"] + (m["p_d"] - m["p_fa"]) * views.reshape(views.shape[0], -1)
         pd = np.concatenate([pd, np.full((pd.shape[0], 1), m["p_fa"])], axis=1)  # absent column
         joint1 = b[None] * pd
@@ -275,7 +317,7 @@ class BayesGrid:
         The camera is for VERIFICATION, so it looks where the victim most likely is
         (Koopman: maximise probability of detection), not where a look is most informative.
         """
-        p = (self.camera_views * self.b_cells[None]).sum(axis=(1, 2))
+        p = (self.camera_views * self._posterior()[0][None]).sum(axis=(1, 2))
         return p - C.PAN_COST_PROB * np.abs(self.pan_angles - float(current_deg)) / 180.0
 
     def best_pan(self, current_deg: float = 0.0) -> tuple[float, float]:
@@ -311,7 +353,8 @@ class BayesGrid:
         """
         m = C.SENSOR_MODELS["audio"]
         W, K = self._wp_xy.shape[0], len(C.BEARING_BINS_DEG)
-        b = np.append(self.b_cells.ravel(), self.b_absent)  # (N+1,)
+        cells, absent = self._posterior()
+        b = np.append(cells.ravel(), absent)  # (N+1,)
         pd = (m["p_fa"] + (m["p_d"] - m["p_fa"]) * self._wp_audio_view).reshape(W, -1)  # (W, N)
         pk = self._bearing_lik.reshape(W, K, -1)  # (W, K, N)
         det = pd[:, None, :] * pk  # P(det, bin k | cell)
@@ -328,7 +371,8 @@ class BayesGrid:
         """IG (bits) of one audio (with bearing) + one Wi-Fi look from each waypoint,
         minus walking and revisit costs. The waypoint the probe is on is excluded.
         """
-        ig = self._expected_ig_bearing() + self._expected_ig(self._wp_wifi_view, "wifi")
+        audio_ig = self._expected_ig(self._wp_audio_view, "audio") if self.audio_mono else self._expected_ig_bearing()
+        ig = audio_ig + self._expected_ig(self._wp_wifi_view, "wifi")
         dist = np.hypot(self._wp_xy[:, 0] - self.probe_xy[0], self._wp_xy[:, 1] - self.probe_xy[1])
         ig = ig - C.WAYPOINT_TRAVEL_PENALTY_BITS * dist / self.diag_m
         visits = np.asarray([self.visits.get(k, 0) for k in self._wp_names], dtype=float)
@@ -360,4 +404,4 @@ class BayesGrid:
         return float(np.clip(self.bearing_from(row, col, C.TURRET_XY), C.PAN_MIN_DEG, C.PAN_MAX_DEG))
 
     def to_list(self, decimals: int = 6) -> list[list[float]]:
-        return np.round(self.b_cells, decimals).tolist()
+        return np.round(self._posterior()[0], decimals).tolist()

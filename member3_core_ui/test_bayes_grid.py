@@ -106,8 +106,8 @@ def test_triangulation_from_two_stops():
             g.update_audio(0.9, 0.9, b)
     row, col, mass = g.best_region()
     vr, vc = g.world_to_cell(*victim)
-    assert abs(row - vr) <= 2 and abs(col - vc) <= 2
-    assert mass > C.T2_MIN_REGION_P
+    assert abs(row - vr) <= 3 and abs(col - vc) <= 3  # within 0.6 m with a 12 deg bearing sigma
+    assert mass >= C.T2_MIN_REGION_P - 0.02
 
 
 def test_bearing_plus_wifi_range_pins_victim():
@@ -260,3 +260,48 @@ def test_reject_and_found():
     g.mark_found(r, c)
     assert g.found == [(r, c)] and g.region_mass(r, c) < 1e-9
     assert g.p_absent() >= 0.5 - 1e-9 and math.isclose(total(g), 1.0)
+
+
+# ------------------------------------------------- mono fallback (loudness)
+def _snr(probe, victim, l1=32.0):
+    return l1 - 20 * math.log10(max(math.hypot(victim[0] - probe[0], victim[1] - probe[1]), 0.3))
+
+
+def test_level_term_inactive_in_stereo_and_with_one_stop():
+    g = BayesGrid()
+    g.set_stop_level(1, (0.0, 0.5), 20.0)
+    g.set_stop_level(2, (1.5, 1.0), 25.0)
+    assert not g.audio_mono and np.allclose(g.level_loglik(), 0.0)  # stereo: ignored
+    g.audio_mono = True
+    g.levels.pop(2)
+    assert np.allclose(g.level_loglik(), 0.0)  # one stop: unknown source level, no info
+
+
+def test_level_term_localises_without_bearings():
+    g = BayesGrid()
+    g.audio_mono = True
+    victim = (1.6, 2.6)
+    for i, wp in enumerate(("W0", "W1", "W2", "W3")):
+        g.set_stop_level(i, g.waypoints[wp], _snr(g.waypoints[wp], victim))
+    r, c, m = g.best_region(C.CANDIDATE_RADIUS_CELLS_MONO)
+    x, y = g.cell_to_world(r, c)
+    assert math.hypot(x - victim[0], y - victim[1]) < 1.0
+    assert math.isclose(g.prob().sum() + g.p_absent(), 1.0)
+
+
+def test_unknown_source_level_cancels():
+    a, b = BayesGrid(), BayesGrid()
+    a.audio_mono = b.audio_mono = True
+    victim = (-1.0, 3.5)
+    for i, wp in enumerate(("W0", "W1", "W3")):
+        a.set_stop_level(i, a.waypoints[wp], _snr(a.waypoints[wp], victim, l1=25.0))
+        b.set_stop_level(i, b.waypoints[wp], _snr(b.waypoints[wp], victim, l1=40.0))  # 15 dB louder victim
+    assert np.allclose(a.level_loglik(), b.level_loglik())
+
+
+def test_mono_planner_uses_omni_audio():
+    g = BayesGrid()
+    g.audio_mono = True
+    g.set_probe_waypoint("W0")
+    s = g.waypoint_info_gain()
+    assert len(s) == len(C.WAYPOINTS) - 1 and all(np.isfinite(list(s.values())))

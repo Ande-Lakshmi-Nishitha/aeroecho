@@ -77,16 +77,38 @@ Units everywhere: degrees, metres, seconds. Timestamps = `time.time()` on the la
 **Bearing math (the sign matters):**
 
 ```
-tau = t_left - t_right        # seconds; positive when the RIGHT mic hears it first
-theta = degrees(arcsin(clip(343.0 * tau / 0.12, -1, 1)))   # then clamp to [-60, +60]
+tau_us = (t_left - t_right) * 1e6 - OFFSET_US      # positive when the RIGHT mic hears it first
+theta = degrees(arcsin(clip(343.0 * tau_us * 1e-6 / MIC_SPACING_M, -1, 1)))   # then clamp to [-60, +60]
 ```
 
+Measured on the built-in AMD laptop array (WASAPI **exclusive** mode, `endfire` test): **`MIC_SPACING_M = 0.034`, `OFFSET_US = +20`**. Load both from `endfire.json` (or `calibration.json`) rather than hard-coding them, and re-run the test if the laptop changes. Limit the GCC-PHAT peak search to about ±120 µs (±d/c plus the offset). Expect about 5° accuracy on claps and about 10–12° on voice; the Core models 12° widening as 1/cos θ.
+
 - Channel 0 = **left** earbud, channel 1 = **right**, as seen from behind the probe looking along its arrow. Verify with the clap test; if the sign is wrong, swap channels in your code.
-- **Capture at 48 kHz** for GCC-PHAT: about 3.4° per sample at broadside and about 7° at 60°. 16 kHz gives about 10° per sample, which is too coarse. Use parabolic peak interpolation. Resample to 16 kHz mono (mean of both channels) for YAMNet.
+- **Capture at 48 kHz**, WASAPI **exclusive** mode (shared mode lets Windows/AMD processing scramble the timing). At 3.4 cm spacing one sample is about 12° at broadside, so sub-sample peak interpolation is mandatory. Use parabolic peak interpolation. Resample to 16 kHz mono (mean of both channels) for YAMNet.
 - Bandpass 300–4000 Hz for **GCC-PHAT and SNR only**. YAMNet gets the unfiltered 16 kHz waveform.
 - **SNR:** band power (300–4000 Hz) of the window over a noise floor = 10th percentile of window powers over the last 10 s.
-- **Hardware:** both channels must come from **one** device with one sample clock. Two separate USB earphones drift and break TDOA. Check with `python -m sounddevice`: one input device must show 2 channels.
+- **Hardware:** use the laptop's built-in **Microphone Array (AMD)**, selected by name, not by device number (numbers shift when USB devices are plugged in). The USB-C earphones are mono and cannot give direction. Turn off Windows "Audio enhancements" and AMD noise suppression for the array.
+- **Orientation:** the array listens out of the screen, so in the demo the **screen faces the search area (+y)**.
 - You do **not** need to handle front/back ambiguity. The Core models it.
+
+**Mono fallback (only one input channel available):**
+
+First check the hardware:
+
+```python
+import sounddevice as sd
+d = sd.query_devices(kind="input"); print(d["name"], d["max_input_channels"])
+```
+
+`2` or more means stereo GCC-PHAT as above. `1` means the mono fallback; send the same records with these changes:
+
+| Field | Mono rule |
+| --- | --- |
+| `mic_channels` | `1` (send `2` or omit in stereo) |
+| `bearing_deg` | `null` (the Core ignores it in mono anyway) |
+| `snr_db` | **required**: SNR of this window in dB, the same value behind `listening_quality` |
+
+The Core then localises by comparing **loudness across probe stops**: SNR drops about 6 dB per doubling of distance, and the victim's unknown voice level cancels out. Expect about 1–2 m accuracy after 3–5 stops instead of about 0.3 m in stereo. The candidate box widens to 1.8 m and needs detections from 3 stops. Do not normalise or AGC the audio level in mono, because the Core needs the real loudness.
 
 ## 4. Member 1: Pi turret API
 

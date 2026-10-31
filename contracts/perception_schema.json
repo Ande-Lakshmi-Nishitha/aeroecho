@@ -64,6 +64,15 @@
       ],
       "description": "Audio uses Voice|Cough|Breathing|Machinery (argmax of softmax). Wi-Fi uses Respiration|Presence|None."
     },
+    "mic_channels": {
+      "type": "integer",
+      "enum": [
+        1,
+        2
+      ],
+      "default": 2,
+      "description": "Audio only. 2 = stereo array (GCC-PHAT bearings). 1 = mono fallback: bearing_deg is ignored by the Core and snr_db becomes REQUIRED (the Core localises by comparing loudness across probe stops)."
+    },
     "class_probs": {
       "type": "object",
       "description": "Optional, audio only: full softmax, keys exactly Voice, Cough, Breathing, Machinery.",
@@ -93,7 +102,7 @@
     },
     "snr_db": {
       "type": "number",
-      "description": "Optional, audio only: raw SNR used to compute listening_quality (debug / evidence card)."
+      "description": "Audio: SNR in dB of this window (300-4000 Hz band power over the rolling noise floor), the same value used for listening_quality. Recommended in stereo, REQUIRED when mic_channels = 1."
     },
     "tdoa_us": {
       "type": [
@@ -164,6 +173,23 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "mic_channels": {
+            "const": 1
+          }
+        },
+        "required": [
+          "mic_channels"
+        ]
+      },
+      "then": {
+        "required": [
+          "snr_db"
+        ]
+      }
     }
   ],
   "additionalProperties": true,
@@ -195,6 +221,17 @@
       "primary_class": "Respiration",
       "range_m": 2.4,
       "range_sigma_m": 0.6
+    },
+    {
+      "schema_version": 1,
+      "sensor_id": "laptop_earphone_mics",
+      "timestamp": 1793442001.0,
+      "detect_score": 0.78,
+      "bearing_deg": null,
+      "listening_quality": 0.73,
+      "primary_class": "Voice",
+      "mic_channels": 1,
+      "snr_db": 12.0
     }
   ]
 }
