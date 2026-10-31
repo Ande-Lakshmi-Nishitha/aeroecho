@@ -11,3 +11,5 @@ venv/
 # Local datasets (ESC-50, UrbanSound8K, LibriSpeech, ...) - keep the folder, ignore contents
 member2_audio_ml/datasets/*
 !member2_audio_ml/datasets/.gitkeep
+audit_log.jsonl
+*.jsonl.broken-*
